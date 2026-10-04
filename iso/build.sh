@@ -226,8 +226,9 @@ ln -sf "$(basename "${ISO}")" "${OUT}/genix-live.iso"
 
 SFS="${WORK}/iso/genix/x86_64/airootfs.sfs"
 if [[ -f "${SFS}" ]]; then
-    for f in usr/local/bin/genix-install usr/bin/genix-install usr/bin/genix-rebuild usr/bin/genix-render opt/genix/install.sh; do
-    MODE="$(unsquashfs -ll "${SFS}" 2>/dev/null | awk -v f="$f" 'index($NF, f) {print $1; exit}')"
+  LISTING="$(unsquashfs -ll "${SFS}" 2>/dev/null)"
+  for f in usr/local/bin/genix-install usr/bin/genix-install usr/bin/genix-rebuild usr/bin/genix-render opt/genix/install.sh; do
+    MODE="$(awk -v f="$f" '!s && index($NF, f) {print $1; s=1}' <<< "${LISTING}")"
     if [[ "${MODE}" != *x* ]]; then
       echo "${f} is not executable in ${SFS} (mode=${MODE:-missing})" >&2
       exit 1
