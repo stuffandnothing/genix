@@ -18,7 +18,6 @@ jobs:
       - name: install deps
         run: |
           pacman -Syu --noconfirm --needed archiso git base-devel sudo rsync
-
       - name: checkout
         uses: actions/checkout@v4
         with:
@@ -27,10 +26,11 @@ jobs:
       - name: build iso
         run: |
           sudo ./iso/build.sh
-
       - name: upload iso
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: genix-live
           path: iso/out/*.iso
+          compression-level: 0
           if-no-files-found: error
