@@ -7,7 +7,7 @@ export default function ReleaseExplorer() {
   useEffect(() => {
     async function fetchReleases() {
       try {
-        const res = await fetch('https://api.github.com/repos/Kenraaliskuutteri/Kenraaliskuutteri/releases', {
+        const res = await fetch('https://api.github.com/repos/zubbledew6/genix/releases', {
           headers: { 'Accept': 'application/vnd.github.v3+json' }
         });
         if (!res.ok) throw new Error(res.status);
