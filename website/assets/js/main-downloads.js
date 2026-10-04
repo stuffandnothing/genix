@@ -23,11 +23,7 @@ function DownloadWidget() {
   }
 
   // Categorize releases into stable and experimental based on the prerelease flag and naming conventions, very advanced tech right guys? OMG AUTOMATION
-  const isExp = (rel) => {
-    const title = (rel.name || '').toLowerCase();
-    const tag = (rel.tag_name || '').toLowerCase();
-    return rel.prerelease || title.includes('experimental') || tag.includes('experimental') || tag.includes('v1.0.0');
-  };
+  const isExp = (rel) => (rel.name || '').toLowerCase().includes('experimental');
 
   const stableReleases = releases.filter((rel) => !isExp(rel));
   const experimentalReleases = releases.filter((rel) => isExp(rel));
@@ -37,7 +33,6 @@ function DownloadWidget() {
 
   const olderStable = stableReleases.slice(1);
   const olderExperimental = experimentalReleases.slice(1);
-
 
   function renderPanelCard(release, isExperimental) {
     if (!release) return null;
@@ -76,7 +71,6 @@ function DownloadWidget() {
     );
   }
 
-
   function renderListItems(list) {
     if (list.length === 0) {
       return React.createElement('li', { style: { color: '#888' } }, 'No older releases found.');
@@ -101,12 +95,11 @@ function DownloadWidget() {
     renderPanelCard(latestStable, false),
     renderPanelCard(latestExperimental, true),
 
-
     React.createElement(
       'section',
       { className: 'older-isos', style: { marginTop: '32px' } },
       React.createElement('h2', { style: { fontSize: '1.5rem', color: '#fff', marginBottom: '16px' } }, 'Older ISOs'),
-      
+
       React.createElement(
         'details',
         { className: 'iso-dropdown' },
