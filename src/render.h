@@ -1,4 +1,3 @@
-/* toml -> /etc/portage bits + a json snapshot of what we did */
 #ifndef GENIX_RENDER_H
 #define GENIX_RENDER_H
 

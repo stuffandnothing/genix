@@ -1,5 +1,3 @@
-/* Enough TOML for our config. No dates, no fancy types. If it
-   dies on your file, it's probably quotes or a trailing comma. */
 #include "toml.h"
 #include "util.h"
 
@@ -330,44 +328,6 @@ split_dotted(char *key, char ***out, int *n)
 	return *n > 0;
 }
 
-/* Parse a key path: key ('.' key)*. Each segment is parsed on its own, so
-   dots inside a quoted key (e.g. "=dev-lang/rust-1.80.0") stay literal
-   instead of being treated as table separators. Returns a NULL-terminated
-   list of owned segment strings; caller frees each part and the array. */
-static char **
-parse_dotted_key(P *p, int *nparts)
-{
-	char **parts = NULL;
-	int cap = 0, n = 0;
-	char *k = parse_key(p);
-
-	if (!k)
-		return NULL;
-	for (;;) {
-		if (n >= cap) {
-			cap = cap ? cap * 2 : 4;
-			parts = xrealloc(parts, sizeof(char *) * cap);
-		}
-		parts[n++] = k;
-		if (!eat(p, '.'))
-			break;
-		k = parse_key(p);
-		if (!k)
-			break;
-	}
-	*nparts = n;
-	return parts;
-}
-
-static void
-free_parts(char **parts, int nparts)
-{
-	int i;
-	for (i = 0; i < nparts; i++)
-		free(parts[i]);
-	free(parts);
-}
-
 static Toml *
 parse_doc(const char *src, char **err)
 {
@@ -387,57 +347,95 @@ parse_doc(const char *src, char **err)
 			break;
 		c = peek(&p);
 		if (c == '[') {
-			char **parts;
+			char *inside, **parts;
 			int nparts, i, arr = 0;
 
 			p.p++;
 			if (eat(&p, '['))
 				arr = 1;
-			/* [a.b.c] — parse each segment; quoted dots stay literal */
-			parts = parse_dotted_key(&p, &nparts);
-			if (!parts)
+			inside = parse_key(&p);
+			if (!inside)
 				goto fail;
+			/* [a.b.c] — keep eating .key until the ] */
+			{
+				char *acc = xstrdup(inside);
+				free(inside);
+				while (eat(&p, '.')) {
+					char *more = parse_key(&p);
+					char *join;
+					if (!more)
+						break;
+					join = strf("%s.%s", acc, more);
+					free(acc);
+					free(more);
+					acc = join;
+				}
+				inside = acc;
+			}
 			if (arr) {
 				if (!eat(&p, ']') || !eat(&p, ']')) {
 					seterr(&p, "bad [[table]]");
-					free_parts(parts, nparts);
+					free(inside);
 					goto fail;
 				}
 			} else if (!eat(&p, ']')) {
 				seterr(&p, "bad [table]");
-				free_parts(parts, nparts);
+				free(inside);
+				goto fail;
+			}
+			if (!split_dotted(inside, &parts, &nparts)) {
+				free(inside);
 				goto fail;
 			}
 			cur = root;
 			for (i = 0; i < nparts; i++)
 				cur = table_ensure(cur, parts[i], TOML_TABLE);
-			free_parts(parts, nparts);
+			free(parts);
+			free(inside);
 			continue;
 		}
 
 		{
-			char **parts;
+			char *k, *acc, **parts;
 			int nparts, i;
 			Toml *v, *parent;
 
-			parts = parse_dotted_key(&p, &nparts);
-			if (!parts)
+			k = parse_key(&p);
+			if (!k)
 				goto fail;
+			acc = xstrdup(k);
+			free(k);
+			while (eat(&p, '.')) {
+				char *more = parse_key(&p);
+				char *join;
+				if (!more)
+					break;
+				join = strf("%s.%s", acc, more);
+				free(acc);
+				free(more);
+				acc = join;
+			}
 			if (!eat(&p, '=')) {
 				seterr(&p, "expected =");
-				free_parts(parts, nparts);
+				free(acc);
 				goto fail;
 			}
 			v = parse_value(&p);
 			if (!v) {
-				free_parts(parts, nparts);
+				free(acc);
+				goto fail;
+			}
+			if (!split_dotted(acc, &parts, &nparts)) {
+				toml_free(v);
+				free(acc);
 				goto fail;
 			}
 			parent = cur;
 			for (i = 0; i < nparts - 1; i++)
 				parent = table_ensure(parent, parts[i], TOML_TABLE);
 			table_set(parent, parts[nparts - 1], v);
-			free_parts(parts, nparts);
+			free(parts);
+			free(acc);
 		}
 	}
 

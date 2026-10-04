@@ -8,7 +8,6 @@ bcachefs-tools
 bind
 bolt
 brltty
-broadcom-wl
 btrfs-progs
 clonezilla
 cloud-init
@@ -37,7 +36,6 @@ gpm
 gptfdisk
 grml-zsh-config
 grub
-gcc
 hdparm
 hyperv
 intel-ucode
@@ -72,7 +70,6 @@ mkinitcpio-nfs-utils
 mmc-utils
 modemmanager
 mtools
-make
 nano
 nbd
 ndisc6
@@ -130,12 +127,4 @@ xdg-utils
 xfsprogs
 xl2tpd
 zsh
-btrfs-progs
-parted
-dosfstools
 python
-nano
-wget
-curl
-iwd
-wpa_supplicant

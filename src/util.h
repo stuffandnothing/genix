@@ -1,4 +1,3 @@
-/* paths + tiny helpers */
 #ifndef GENIX_UTIL_H
 #define GENIX_UTIL_H
 

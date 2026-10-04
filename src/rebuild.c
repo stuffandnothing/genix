@@ -1,4 +1,3 @@
-/* switch / rollback / prune. render first, then emerge the delta. */
 #include "boot.h"
 #include "render.h"
 #include "toml.h"
@@ -10,10 +9,6 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-static const char *portage_files[] = {
-	"make.conf", "package.use", "package.accept_keywords", "package.world", "package.provided", NULL
-};
 
 static int
 next_gen(void)
@@ -106,9 +101,6 @@ active_gen_id(void)
 static const char *
 which_init(void)
 {
-	/* sysv first — openrc also has /etc/init.d. systemd only if
-	   we're actually running under it; having systemctl in PATH
-	   doesn't mean much on a Gentoo box. */
 	if (is_dir("/etc/rc.d/init.d"))
 		return "sysv";
 	if (which("rc-update") && is_dir("/etc/init.d"))
@@ -119,10 +111,23 @@ which_init(void)
 }
 
 static void
+sync_one(int dry, const char *src, const char *dst)
+{
+	if (!exists(src))
+		return;
+	if (dry)
+		printf("would sync %s\n", dst);
+	else {
+		printf("sync %s\n", dst);
+		copy_file(src, dst, 0);
+	}
+}
+
+static void
 sync_portage(int dry, const char *rendered)
 {
-	int i;
 	char *srcbase = strf("%s/portage", rendered);
+	char *src, *dst;
 
 	if (!is_dir(GENIX_PORTAGE) && !dry) {
 		printf("no /etc/portage, skipping portage sync\n");
@@ -133,23 +138,47 @@ sync_portage(int dry, const char *rendered)
 		printf("would update /etc/portage/\n");
 	else
 		mkdir_p(GENIX_PORTAGE);
-	for (i = 0; portage_files[i]; i++) {
-		char *src = strf("%s/%s", srcbase, portage_files[i]);
-		char *dst = strf("%s/%s", GENIX_PORTAGE, portage_files[i]);
-		if (!exists(src)) {
-			free(src);
-			free(dst);
-			continue;
-		}
+
+	src = strf("%s/make.conf", srcbase);
+	dst = strf("%s/make.conf", GENIX_PORTAGE);
+	sync_one(dry, src, dst);
+	free(src);
+	free(dst);
+
+	src = strf("%s/package.use", srcbase);
+	if (is_dir(GENIX_PORTAGE "/package.use"))
+		dst = strf("%s/package.use/genix", GENIX_PORTAGE);
+	else
+		dst = strf("%s/package.use", GENIX_PORTAGE);
+	if (exists(src))
+		sync_one(dry, src, dst);
+	else if (!dry && exists(dst) && !is_dir(dst))
+		unlink(dst);
+	free(src);
+	free(dst);
+
+	src = strf("%s/package.provided", srcbase);
+	if (!dry)
+		mkdir_p(GENIX_PORTAGE "/profile");
+	dst = strf("%s/profile/package.provided", GENIX_PORTAGE);
+	if (exists(src))
+		sync_one(dry, src, dst);
+	else if (!dry && exists(dst))
+		unlink(dst);
+	free(src);
+	free(dst);
+
+	src = strf("%s/package.world", srcbase);
+	if (exists(src)) {
 		if (dry)
-			printf("would sync %s\n", dst);
+			printf("would sync /var/lib/portage/world\n");
 		else {
-			printf("sync %s\n", dst);
-			copy_file(src, dst, 0);
+			mkdir_p("/var/lib/portage");
+			printf("sync /var/lib/portage/world\n");
+			copy_file(src, "/var/lib/portage/world", 0);
 		}
-		free(src);
-		free(dst);
 	}
+	free(src);
 	free(srcbase);
 }
 
@@ -195,15 +224,88 @@ sync_identity(int dry, const char *rendered)
 }
 
 static void
-sync_services(const Manifest *m, int dry)
+disable_one(const char *init, const char *name, int dry)
+{
+	if (!strcmp(init, "openrc")) {
+		if (dry)
+			printf("would disable %s (openrc, default runlevel)\n", name);
+		else {
+			printf("disable %s (openrc, default runlevel)\n", name);
+			cmd(0, 0, "rc-update", "del", name, "default", NULL);
+		}
+		return;
+	}
+	if (!strcmp(init, "systemd")) {
+		char unit[128];
+		if (ends_with(name, ".service"))
+			snprintf(unit, sizeof unit, "%s", name);
+		else
+			snprintf(unit, sizeof unit, "%s.service", name);
+		if (dry)
+			printf("would disable %s (systemd)\n", unit);
+		else {
+			printf("disable %s (systemd)\n", unit);
+			cmd(0, 0, "systemctl", "disable", unit, NULL);
+		}
+		return;
+	}
+	if (strcmp(init, "sysv") != 0)
+		return;
+	{
+		int rl;
+		for (rl = 3; rl <= 5; rl++) {
+			char *rcd = strf("/etc/rc.d/rc%d.d", rl);
+			DIR *d;
+			struct dirent *e;
+			if (!is_dir(rcd)) {
+				free(rcd);
+				continue;
+			}
+			d = opendir(rcd);
+			if (!d) {
+				free(rcd);
+				continue;
+			}
+			while ((e = readdir(d))) {
+				if (e->d_name[0] == 'S' &&
+				    e->d_name[1] >= '0' && e->d_name[1] <= '9' &&
+				    e->d_name[2] >= '0' && e->d_name[2] <= '9' &&
+				    str_eq(e->d_name + 3, name)) {
+					char *p = strf("%s/%s", rcd, e->d_name);
+					if (dry)
+						printf("would disable %s rl %d\n", name, rl);
+					else {
+						printf("disable %s rl %d\n", name, rl);
+						unlink(p);
+					}
+					free(p);
+				}
+			}
+			closedir(d);
+			free(rcd);
+		}
+	}
+}
+
+static void
+sync_services(const Manifest *m, const Manifest *prev, int dry)
 {
 	const char *init;
 	int i;
 
-	if (!m->services.n)
-		return;
 	init = which_init();
-	if (init && !strcmp(init, "openrc")) {
+	if (!init) {
+		if (m->services.n || (prev && prev->services.n))
+			printf("unknown init system, skipping services\n");
+		return;
+	}
+	if (prev) {
+		for (i = 0; i < prev->services.n; i++) {
+			if (!sl_has(&m->services, prev->services.v[i]))
+				disable_one(init, prev->services.v[i], dry);
+		}
+	}
+	if (!strcmp(init, "openrc")) {
 		for (i = 0; i < m->services.n; i++) {
 			char *script = strf("/etc/init.d/%s", m->services.v[i]);
 			if (!exists(script)) {
@@ -221,7 +323,7 @@ sync_services(const Manifest *m, int dry)
 		}
 		return;
 	}
-	if (init && !strcmp(init, "systemd")) {
+	if (!strcmp(init, "systemd")) {
 		for (i = 0; i < m->services.n; i++) {
 			char unit[128];
 			if (ends_with(m->services.v[i], ".service"))
@@ -237,10 +339,8 @@ sync_services(const Manifest *m, int dry)
 		}
 		return;
 	}
-	if (!init || strcmp(init, "sysv") != 0) {
-		printf("unknown init system, skipping services\n");
+	if (strcmp(init, "sysv") != 0)
 		return;
-	}
 	for (i = 0; i < m->services.n; i++) {
 		char *script = strf("/etc/rc.d/init.d/%s", m->services.v[i]);
 		int rl;
@@ -263,7 +363,10 @@ sync_services(const Manifest *m, int dry)
 			d = opendir(rcd);
 			if (d) {
 				while ((e = readdir(d))) {
-					if (strstr(e->d_name, m->services.v[i]))
+					if (e->d_name[0] == 'S' &&
+					    e->d_name[1] >= '0' && e->d_name[1] <= '9' &&
+					    e->d_name[2] >= '0' && e->d_name[2] <= '9' &&
+					    str_eq(e->d_name + 3, m->services.v[i]))
 						already = 1;
 				}
 				closedir(d);
@@ -301,7 +404,7 @@ is_installed(const char *atom)
 
 	slash = strchr(atom, '/');
 	if (!slash)
-		return 0; /* not a cat/pkg atom, skip */
+		return 0;
 	snprintf(cat, sizeof cat, "%.*s", (int)(slash - atom), atom);
 	snprintf(pkg, sizeof pkg, "%s", slash + 1);
 	plen = strlen(pkg);
@@ -311,7 +414,8 @@ is_installed(const char *atom)
 	if (!d)
 		return 0;
 	while ((e = readdir(d))) {
-		if (strncmp(e->d_name, pkg, plen) == 0 && e->d_name[plen] == '-') {
+		if (strncmp(e->d_name, pkg, plen) == 0 && e->d_name[plen] == '-' &&
+		    e->d_name[plen + 1] >= '0' && e->d_name[plen + 1] <= '9') {
 			ok = 1;
 			break;
 		}
@@ -375,7 +479,7 @@ print_plan(const Plan *plan, const Manifest *m, const char *mode)
 {
 	int i;
 
-	printf("plan\n");
+	printf("plan (%s)\n", mode);
 	printf("  config add: ");
 	if (!plan->add.n)
 		printf("-\n");
@@ -410,12 +514,8 @@ print_plan(const Plan *plan, const Manifest *m, const char *mode)
 	}
 	for (i = 0; i < plan->drop.n; i++)
 		printf("    %s (remove)\n", plan->drop.v[i]);
-	if (plan->drop.n) {
-		if (str_eq(mode, "switch"))
-			printf("  remove: emerge -C on dropped packages\n");
-		else
-			printf("  note: rollback does not unmerge dropped packages\n");
-	}
+	if (plan->drop.n)
+		printf("  remove: emerge -C on dropped packages\n");
 }
 
 static int
@@ -468,7 +568,7 @@ emerge_subset(StrList *pkgs, int getbin, int nodeps, int dry, int lfs)
 	argv = xmalloc(sizeof(char *) * n);
 	argv[a++] = "emerge";
 	argv[a++] = "-1";
-	argv[a++] = "-av";
+	argv[a++] = "-v";
 	if (getbin)
 		argv[a++] = "--getbinpkg";
 	if (nodeps)
@@ -477,7 +577,7 @@ emerge_subset(StrList *pkgs, int getbin, int nodeps, int dry, int lfs)
 		argv[a++] = pkgs->v[i];
 	argv[a] = NULL;
 	if (lfs)
-		setenv("FEATURES", "-collision-protect", 0); /* lfs stages fight this */
+		setenv("FEATURES", "-collision-protect", 0);
 	rc = cmdv(dry, 0, argv);
 	free(argv);
 	return rc;
@@ -497,7 +597,6 @@ run_emerges(const Plan *plan, const Manifest *m, int dry, int first_gen)
 				printf("warning: cmake/ninja missing — run bootstrap-build-tools.sh\n");
 		}
 		for (getbin = 0; getbin <= 1; getbin++) {
-			/* src first, then bin — keeps --getbinpkg off the compile set */
 			StrList nodeps, full;
 			int i;
 			sl_init(&nodeps);
@@ -528,7 +627,7 @@ run_emerges(const Plan *plan, const Manifest *m, int dry, int first_gen)
 	if (plan->use_changed && !first_gen) {
 		if (m->lfs_mode)
 			printf("use flags synced to make.conf (lfs: skip auto rebuild)\n");
-		else if (cmd(dry, 0, "emerge", "-av", "--changed-use", "@world", NULL))
+		else if (cmd(dry, 0, "emerge", "-v", "--changed-use", "@world", NULL))
 			return 1;
 	}
 	if (!plan->install.n && !plan->use_changed && !plan->drop.n)
@@ -558,8 +657,8 @@ cmd_switch(int dry, int no_emerge)
 		render_config(cfg, tmp, &m);
 		sync_portage(1, tmp);
 		sync_identity(1, tmp);
-		sync_services(&m, 1);
 		have_prev = manifest_read_json(GENIX_CURRENT "/manifest.json", &prev) == 0;
+		sync_services(&m, have_prev ? &prev : NULL, 1);
 		build_plan(have_prev ? &prev : NULL, &m, &plan);
 		print_plan(&plan, &m, "switch");
 		if (!no_emerge) {
@@ -586,8 +685,8 @@ cmd_switch(int dry, int no_emerge)
 	render_config(cfg, GENIX_RENDERED, &m);
 	sync_portage(0, GENIX_RENDERED);
 	sync_identity(0, GENIX_RENDERED);
-	sync_services(&m, 0);
 	have_prev = manifest_read_json(GENIX_CURRENT "/manifest.json", &prev) == 0;
+	sync_services(&m, have_prev ? &prev : NULL, 0);
 	build_plan(have_prev ? &prev : NULL, &m, &plan);
 	print_plan(&plan, &m, "switch");
 	if (no_emerge)
@@ -620,6 +719,79 @@ cmd_switch(int dry, int no_emerge)
 	return 0;
 }
 
+static void
+print_gen_delta(const Manifest *prev, const Manifest *cur)
+{
+	int i, any = 0, pkg = 0, svc = 0;
+	const char *olduse, *newuse;
+
+	if (!prev) {
+		printf("(initial)\n");
+		return;
+	}
+	for (i = 0; i < cur->packages.n; i++)
+		if (!sl_has(&prev->packages, cur->packages.v[i]))
+			pkg = 1;
+	for (i = 0; i < prev->packages.n; i++)
+		if (!sl_has(&cur->packages, prev->packages.v[i]))
+			pkg = 1;
+	if (pkg) {
+		int first = 1;
+		printf("(");
+		for (i = 0; i < cur->packages.n; i++) {
+			if (sl_has(&prev->packages, cur->packages.v[i]))
+				continue;
+			printf("%s\"%s\",", first ? "" : " ", cur->packages.v[i]);
+			first = 0;
+		}
+		for (i = 0; i < prev->packages.n; i++) {
+			if (sl_has(&cur->packages, prev->packages.v[i]))
+				continue;
+			printf("%s-\"%s\",", first ? "" : " ", prev->packages.v[i]);
+			first = 0;
+		}
+		printf(")");
+		any = 1;
+	}
+	olduse = prev->use ? prev->use : "";
+	newuse = cur->use ? cur->use : "";
+	if (!str_eq(olduse, newuse)) {
+		if (any)
+			printf(" ");
+		printf("(USE: \"%s\")", newuse);
+		any = 1;
+	}
+	for (i = 0; i < cur->services.n; i++)
+		if (!sl_has(&prev->services, cur->services.v[i]))
+			svc = 1;
+	for (i = 0; i < prev->services.n; i++)
+		if (!sl_has(&cur->services, prev->services.v[i]))
+			svc = 1;
+	if (svc) {
+		int first = 1;
+		if (any)
+			printf(" ");
+		printf("(service ");
+		for (i = 0; i < cur->services.n; i++) {
+			if (sl_has(&prev->services, cur->services.v[i]))
+				continue;
+			printf("%s\"%s\",", first ? "" : " ", cur->services.v[i]);
+			first = 0;
+		}
+		for (i = 0; i < prev->services.n; i++) {
+			if (sl_has(&cur->services, prev->services.v[i]))
+				continue;
+			printf("%s-\"%s\",", first ? "" : " ", prev->services.v[i]);
+			first = 0;
+		}
+		printf(")");
+		any = 1;
+	}
+	if (!any)
+		printf("(no change)");
+	printf("\n");
+}
+
 static int
 cmd_list(void)
 {
@@ -641,7 +813,6 @@ cmd_list(void)
 			ids[n++] = atoi(e->d_name);
 	}
 	closedir(d);
-	/* n is tiny, bubble is fine */
 	for (i = 0; i < n; i++)
 		for (j = i + 1; j < n; j++)
 			if (ids[j] < ids[i]) {
@@ -650,35 +821,27 @@ cmd_list(void)
 				ids[j] = t;
 			}
 	active = active_gen_id();
-	for (i = 0; i < n; i++) {
-		char *p = strf("%s/%d/manifest.json", GENIX_GENS, ids[i]);
-		Manifest m;
-		if (manifest_read_json(p, &m) < 0) {
+	{
+		Manifest prev;
+		int have_prev = 0;
+		memset(&prev, 0, sizeof prev);
+		for (i = 0; i < n; i++) {
+			char *p = strf("%s/%d/manifest.json", GENIX_GENS, ids[i]);
+			Manifest m;
+			if (manifest_read_json(p, &m) < 0) {
+				free(p);
+				continue;
+			}
 			free(p);
-			continue;
+			printf("%sgeneration: %-14d", ids[i] == active ? "* " : "  ", m.generation);
+			print_gen_delta(have_prev ? &prev : NULL, &m);
+			if (have_prev)
+				manifest_free(&prev);
+			prev = m;
+			have_prev = 1;
 		}
-		printf("%s %3d  %s\n", ids[i] == active ? "*" : " ", m.generation, m.timestamp ? m.timestamp : "?");
-		printf("      use: %s\n", m.use && m.use[0] ? m.use : "-");
-		printf("      pkgs: ");
-		if (!m.packages.n)
-			printf("-\n");
-		else {
-			int k;
-			for (k = 0; k < m.packages.n; k++)
-				printf("%s%s", k ? ", " : "", m.packages.v[k]);
-			printf("\n");
-		}
-		if (m.provided.n)
-			printf("      provided: %d\n", m.provided.n);
-		if (m.services.n) {
-			int k;
-			printf("      services: ");
-			for (k = 0; k < m.services.n; k++)
-				printf("%s%s", k ? ", " : "", m.services.v[k]);
-			printf("\n");
-		}
-		manifest_free(&m);
-		free(p);
+		if (have_prev)
+			manifest_free(&prev);
 	}
 	return 0;
 }
@@ -722,6 +885,17 @@ cmd_rollback(int gen_id, int dry)
 	if (dry) {
 		build_plan(have_prev ? &prev : NULL, &target, &plan);
 		print_plan(&plan, &target, "rollback");
+		sync_services(&target, have_prev ? &prev : NULL, 1);
+		if (run_unmerges(&plan, 1) || run_emerges(&plan, &target, 1, 0)) {
+			plan_free(&plan);
+			manifest_free(&target);
+			if (have_prev)
+				manifest_free(&prev);
+			free(gdir);
+			free(cfg_src);
+			free(man_src);
+			return 1;
+		}
 		printf("dry run, system unchanged\n");
 		plan_free(&plan);
 		manifest_free(&target);
@@ -736,9 +910,21 @@ cmd_rollback(int gen_id, int dry)
 	render_config(GENIX_ETC "/configuration.toml", GENIX_RENDERED, &m);
 	sync_portage(0, GENIX_RENDERED);
 	sync_identity(0, GENIX_RENDERED);
-	sync_services(&m, 0);
+	sync_services(&m, have_prev ? &prev : NULL, 0);
 	build_plan(have_prev ? &prev : NULL, &m, &plan);
 	print_plan(&plan, &m, "rollback");
+	if (run_unmerges(&plan, 0)) {
+		fprintf(stderr, "unmerge failed, generation not activated\n");
+		plan_free(&plan);
+		manifest_free(&m);
+		manifest_free(&target);
+		if (have_prev)
+			manifest_free(&prev);
+		free(gdir);
+		free(cfg_src);
+		free(man_src);
+		return 1;
+	}
 	if (run_emerges(&plan, &m, 0, 0)) {
 		fprintf(stderr, "emerge failed, generation not activated\n");
 		plan_free(&plan);

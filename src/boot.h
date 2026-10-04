@@ -1,4 +1,3 @@
-/* btrfs snapshots + grub menu entries for generations */
 #ifndef GENIX_BOOT_H
 #define GENIX_BOOT_H
 

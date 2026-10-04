@@ -1,4 +1,3 @@
-/* subset parser. enough for configuration.toml, not the spec. */
 #ifndef GENIX_TOML_H
 #define GENIX_TOML_H
 

@@ -10,6 +10,7 @@ name = "Genix"
 pretty_name = "Genix"
 id = "genix"
 id_like = "gentoo"
+home_url = "https://genixos.org/"
 version = "0.1"
 version_id = "0.1"
 

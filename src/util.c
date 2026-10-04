@@ -1,4 +1,3 @@
-/* fork/exec, mkdir -p, that kind of thing */
 #include "util.h"
 
 #include <errno.h>

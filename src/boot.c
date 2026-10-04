@@ -1,5 +1,3 @@
-/* GRUB entries point at @genix-N snapshots. subvolid=5 is the tree
-   root — @ is just a subvol, mounting / doesn't let us snapshot it. */
 #include "boot.h"
 #include "util.h"
 
@@ -11,7 +9,6 @@
 #define GENS GENIX_GENS
 #define GRUB_SNIPPET "/etc/grub.d/40_genix"
 #define GRUB_CFG "/boot/grub/grub.cfg"
-#define EFI_GRUB_CFG "/boot/efi/grub/grub.cfg"
 #define BTRFS_TOP "/run/genix-btrfs-top"
 
 static const char *
@@ -130,7 +127,7 @@ subvol_name(const char *prefix, int gen_id, char *out, size_t n)
 static int
 list_gen_ids(int *ids, int max)
 {
-	FILE *p; /* lazy: ls instead of another opendir loop */
+	FILE *p;
 	char line[128];
 	int n = 0, id, i, j;
 
@@ -185,7 +182,7 @@ mount_btrfs_top(void)
 	mkdir_p(BTRFS_TOP);
 	if (cmd(0, 0, "mountpoint", "-q", BTRFS_TOP, NULL) == 0)
 		return 1;
-	return cmd(0, 0, "mount", "-o", "subvolid=5", dev, BTRFS_TOP, NULL) == 0; /* FS_TREE */
+	return cmd(0, 0, "mount", "-o", "subvolid=5", dev, BTRFS_TOP, NULL) == 0;
 }
 
 static void
@@ -193,6 +190,82 @@ unmount_btrfs_top(void)
 {
 	if (cmd(0, 0, "mountpoint", "-q", BTRFS_TOP, NULL) == 0)
 		cmd(0, 0, "umount", BTRFS_TOP, NULL);
+}
+
+static int
+opt_end(char c)
+{
+	return c == 0 || c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static char *
+fstab_set_subvol(const char *text, const char *subvol)
+{
+	const char *p = text;
+	const char key[] = "subvol=";
+	size_t klen = sizeof key - 1;
+	size_t slen = strlen(subvol);
+	char *out = xmalloc(64);
+	size_t n = 0, cap = 64;
+
+	out[0] = 0;
+	while (*p) {
+		if (!strncmp(p, key, klen) && p[klen] == '@' && opt_end(p[klen + 1])) {
+			size_t add = klen + slen;
+			while (n + add + 1 > cap) {
+				cap *= 2;
+				out = xrealloc(out, cap);
+			}
+			memcpy(out + n, key, klen);
+			n += klen;
+			memcpy(out + n, subvol, slen);
+			n += slen;
+			out[n] = 0;
+			p += klen + 1;
+			continue;
+		}
+		if (n + 2 > cap) {
+			cap *= 2;
+			out = xrealloc(out, cap);
+		}
+		out[n++] = *p++;
+		out[n] = 0;
+	}
+	return out;
+}
+
+static void
+patch_snapshot_fstab(const char *fstab, const char *subvol)
+{
+	char *text, *out;
+
+	text = slurp(fstab);
+	if (!text)
+		return;
+	out = fstab_set_subvol(text, subvol);
+	if (strcmp(out, text) != 0) {
+		printf("boot: %s root subvol=%s\n", fstab, subvol);
+		write_file(fstab, out, 0644, 0);
+	}
+	free(out);
+	free(text);
+}
+
+static void
+patch_generation_fstabs(const int *ids, int n, const BootCfg *bc)
+{
+	int i;
+
+	if (!mount_btrfs_top())
+		return;
+	for (i = 0; i < n; i++) {
+		char sv[128], fstab[512];
+		subvol_name(bc->subvol_prefix, ids[i], sv, sizeof sv);
+		snprintf(fstab, sizeof fstab, "%s/%s/etc/fstab", BTRFS_TOP, sv);
+		if (exists(fstab))
+			patch_snapshot_fstab(fstab, sv);
+	}
+	unmount_btrfs_top();
 }
 
 static int
@@ -225,6 +298,11 @@ snapshot_generation(int gen_id, const BootCfg *bc)
 	snprintf(dst, sizeof dst, "%s/%s", BTRFS_TOP, name);
 	printf("boot: snapshot %s -> %s\n", src, dst);
 	rc = cmd(0, 0, btrfs, "subvolume", "snapshot", src, dst, NULL);
+	if (rc == 0) {
+		char fstab[512];
+		snprintf(fstab, sizeof fstab, "%s/etc/fstab", dst);
+		patch_snapshot_fstab(fstab, name);
+	}
 	unmount_btrfs_top();
 	return rc == 0;
 }
@@ -259,7 +337,7 @@ clean_kargs(const char *kargs)
 
 	for (tok = strtok_r(tmp, " ", &save); tok; tok = strtok_r(NULL, " ", &save)) {
 		if (starts_with(tok, "rootflags=subvol="))
-			continue; /* we stamp our own per-entry */
+			continue;
 		{
 			size_t ln = strlen(tok);
 			if (n + ln + 2 >= cap) {
@@ -321,8 +399,6 @@ efi_grub_path(const BootCfg *bc)
 {
 	if (bc->efi_grub_cfg[0])
 		return bc->efi_grub_cfg;
-	if (exists(EFI_GRUB_CFG))
-		return EFI_GRUB_CFG;
 	return NULL;
 }
 
@@ -352,7 +428,7 @@ write_grub_snippet(int *ids, int n, const BootCfg *bc)
 	base = clean_kargs(kargs);
 
 	off += (size_t)snprintf(body + off, sizeof body - off,
-		"#!/bin/sh\nset -e\n\n# Genix boot generations — genix-rebuild boot sync\n\ncat << EOF\n");
+		"#!/bin/sh\nset -e\n\ncat << EOF\n");
 	if (kpath[0]) {
 		off += (size_t)snprintf(body + off, sizeof body - off,
 			"menuentry 'Genix current (%s)' {\n  linux %s %s rootflags=subvol=%s\n%s%s%s}\n\n",
@@ -369,7 +445,7 @@ write_grub_snippet(int *ids, int n, const BootCfg *bc)
 				break;
 		}
 	} else {
-		off += (size_t)snprintf(body + off, sizeof body - off, "# could not parse /boot/grub/grub.cfg\n");
+		off += (size_t)snprintf(body + off, sizeof body - off, "echo 'could not parse /boot/grub/grub.cfg' >&2\n");
 	}
 	snprintf(body + off, sizeof body - off, "EOF\n");
 	write_file(GRUB_SNIPPET, body, 0755, 0);
@@ -409,7 +485,7 @@ write_efi_grub_cfg(int *ids, int n, const BootCfg *bc)
 	if (bc->efi_kernel[0])
 		snprintf(kpath, sizeof kpath, "%s", bc->efi_kernel);
 	if (!kpath[0])
-		snprintf(kpath, sizeof kpath, "/vmlinuz-live"); /* installer ISO leftover */
+		snprintf(kpath, sizeof kpath, "/vmlinuz-live");
 	if (!kargs[0]) {
 		char dev[256];
 		root_mount(dev, sizeof dev, NULL, 0);
@@ -503,6 +579,7 @@ boot_sync(const BootCfg *bc)
 		return 1;
 	}
 	n = list_gen_ids(ids, 256);
+	patch_generation_fstabs(ids, n, bc);
 	write_grub_snippet(ids, n, bc);
 	{
 		int mk = run_grub_mkconfig();

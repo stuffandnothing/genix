@@ -1,5 +1,4 @@
 #!/bin/bash
-# Build genix-live.iso on Arch/CachyOS (MAIN PC only — writes iso/out/, not your disk)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,6 +13,21 @@ if [[ "${EUID}" -ne 0 ]]; then
 fi
 
 if [[ ! -d "${RELENG}" ]]; then
+  if grep -q '^ID=artix' /etc/os-release 2>/dev/null; then
+    echo "Artix has no archiso package. this live stick is still built from Arch releng." >&2
+    echo "the installed system stays Gentoo. only the USB builder is Arch." >&2
+    echo "" >&2
+    echo "once, on this pc:" >&2
+    echo "  sudo pacman -S artix-archlinux-support squashfs-tools" >&2
+    echo "  sudo pacman-key --populate archlinux" >&2
+    echo "put this at the bottom of /etc/pacman.conf if it is not already there:" >&2
+    echo "  [extra]" >&2
+    echo "  Include = /etc/pacman.d/mirrorlist-arch" >&2
+    echo "then:" >&2
+    echo "  sudo pacman -Sy archlinux-keyring archiso arch-install-scripts" >&2
+    echo "  sudo $0" >&2
+    exit 1
+  fi
   echo "need archiso: sudo pacman -S archiso" >&2
   exit 1
 fi
@@ -28,15 +42,20 @@ if ((${#MISSING[@]})); then
   pacman -Sy --needed --noconfirm "${MISSING[@]}"
 fi
 
-echo "building genix binaries (x86-64-v2, ignores host CFLAGS)..."
-make -C "${ROOT}" clean
+echo "building genix binaries..."
 make -C "${ROOT}"
 
 echo "building profile from archiso releng + genix overlay..."
 rm -rf "${PROFILE}"
 cp -a "${RELENG}" "${PROFILE}"
 
-# Genix branding
+if grep -q '^ID=artix' /etc/os-release 2>/dev/null; then
+  mkdir -p /var/cache/pacman/genix-iso
+  sed -i 's|^Include = /etc/pacman.d/mirrorlist$|Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch|' \
+    "${PROFILE}/pacman.conf"
+  sed -i '/^\[options\]/a CacheDir = /var/cache/pacman/genix-iso' "${PROFILE}/pacman.conf"
+fi
+
 sed -i 's/^iso_name=.*/iso_name="genix"/' "${PROFILE}/profiledef.sh"
 sed -i 's/^iso_label=.*/iso_label="GENIX_$(date +%Y%m)"/' "${PROFILE}/profiledef.sh"
 sed -i 's/^iso_publisher=.*/iso_publisher="Genix"/' "${PROFILE}/profiledef.sh"
@@ -105,29 +124,10 @@ ExecStart=
 ExecStart=-/usr/bin/agetty --noreset --noclear --autologin root - ${TERM}
 EOF
 
-cat > "${PROFILE}/airootfs/usr/local/bin/Installation_guide" <<'EOF'
-#!/bin/sh
-exec xdg-open 'https://github.com/zubbledew6/genix/blob/main/iso/README.md'
-EOF
-chmod 755 "${PROFILE}/airootfs/usr/local/bin/Installation_guide"
-
-# Live environment only — nothing here is copied to the target. The installed
-# system is a Gentoo stage3 fetched at install time.
 cat >> "${PROFILE}/packages.x86_64" <<'EOF'
-btrfs-progs
-parted
-dosfstools
 python
-nano
-wget
-curl
-iwd
-wpa_supplicant
-gcc
-make
 EOF
 
-# Genix repo on live image
 mkdir -p "${PROFILE}/airootfs/opt/genix"
 rsync -a --delete \
   --exclude='.git' \
@@ -138,16 +138,8 @@ rsync -a --delete \
 
 cat > "${PROFILE}/airootfs/etc/motd" <<'EOF'
 
-  Genix live — boot on TARGET laptop only
-  ───────────────────────────────────────
-  Installs Gentoo + OpenRC + Genix. Needs network.
-
   WiFi:    iwctl station wlan0 connect "SSID"
-  Plan:    genix-install --dry-run
   Install: genix-install
-
-  The installer can erase the whole disk, install into
-  free space next to Windows, or hand you cfdisk.
 
 EOF
 
@@ -166,31 +158,24 @@ printf '%s\n' "${GENIX_INSTALL_WRAPPER}" > "${PROFILE}/airootfs/usr/local/bin/ge
 printf '%s\n' "${GENIX_INSTALL_WRAPPER}" > "${PROFILE}/airootfs/usr/bin/genix-install"
 chmod 755 "${PROFILE}/airootfs/usr/local/bin/genix-install" "${PROFILE}/airootfs/usr/bin/genix-install"
 
+mkdir -p "${PROFILE}/airootfs/etc/systemd/system/multi-user.target.wants"
+ln -sfn /usr/lib/systemd/system/iwd.service \
+  "${PROFILE}/airootfs/etc/systemd/system/multi-user.target.wants/iwd.service"
+ln -sfn /usr/lib/systemd/system/systemd-networkd.service \
+  "${PROFILE}/airootfs/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
+ln -sfn /usr/lib/systemd/system/systemd-resolved.service \
+  "${PROFILE}/airootfs/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+
 cat > "${PROFILE}/airootfs/root/customize_airootfs.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 install -Dm644 /etc/os-release /usr/lib/os-release
-# invoked via bash: the airootfs copy drops execute bits
 bash /opt/genix/install.sh
 chmod 755 /opt/genix/install.sh /opt/genix/bin/* 2>/dev/null || true
 chmod 755 /usr/bin/genix-install /usr/local/bin/genix-install /usr/bin/genix-rebuild /usr/bin/genix-render 2>/dev/null || true
 EOF
 chmod 755 "${PROFILE}/airootfs/root/customize_airootfs.sh"
 
-cat > "${PROFILE}/airootfs/root/.zshrc" <<'EOF'
-if [[ -o interactive ]]; then
-  cat /etc/motd
-fi
-EOF
-
-cat > "${PROFILE}/airootfs/root/.zlogin" <<'EOF'
-#!/usr/bin/env bash
-[[ -f /root/.automated_script.sh ]] && /root/.automated_script.sh
-EOF
-chmod 755 "${PROFILE}/airootfs/root/.zlogin"
-
-# mkarchiso copies airootfs with --no-preserve=mode, so every execute bit is lost
-# unless the path is listed in file_permissions. Derive the list from the real files.
 python3 - <<'PY' "${PROFILE}"
 import os
 import pathlib
@@ -222,18 +207,13 @@ PY
 
 mkdir -p "${OUT}"
 rm -f "${OUT}/genix-live.iso"
-# mkarchiso's _run_once skips any step whose marker file exists in the work dir,
-# so leaving the work dir in place makes a rebuild silently reuse the old
-# airootfs. Packages still come from the host pacman cache, not the network.
 rm -rf "${WORK}"
 export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(date +%s)}"
 BUILD_START="$(date +%s)"
 echo "mkarchiso (10-30 min; every run is a full rebuild)..."
 mkarchiso -v -w "${WORK}" -o "${OUT}" "${PROFILE}"
 
-set +o pipefail
 ISO="$(find "${OUT}" -maxdepth 1 -name '*.iso' ! -name 'genix-live.iso' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
-set -o pipefail
 if [[ -z "${ISO}" || ! -f "${ISO}" ]]; then
   echo "mkarchiso did not produce an iso in ${OUT}" >&2
   exit 1
@@ -246,21 +226,15 @@ ln -sf "$(basename "${ISO}")" "${OUT}/genix-live.iso"
 
 SFS="${WORK}/iso/genix/x86_64/airootfs.sfs"
 if [[ -f "${SFS}" ]]; then
-  set +o pipefail
-  for f in usr/local/bin/genix-install usr/bin/genix-install usr/bin/genix-rebuild usr/bin/genix-render opt/genix/install.sh; do
+    for f in usr/local/bin/genix-install usr/bin/genix-install usr/bin/genix-rebuild usr/bin/genix-render opt/genix/install.sh; do
     MODE="$(unsquashfs -ll "${SFS}" 2>/dev/null | awk -v f="$f" 'index($NF, f) {print $1; exit}')"
     if [[ "${MODE}" != *x* ]]; then
       echo "${f} is not executable in ${SFS} (mode=${MODE:-missing})" >&2
       exit 1
     fi
   done
-  set -o pipefail
 fi
-sha256sum "${ISO}" | tee "${ISO}.sha256" >/dev/null
 
 echo ""
 echo "DONE: ${ISO}"
 ls -lh "${ISO}" "${OUT}/genix-live.iso"
-echo ""
-echo "SHA256: $(awk '{print $1}' "${ISO}.sha256")"
-echo "GitHub release: ./scripts/release-iso.sh --dry-run"

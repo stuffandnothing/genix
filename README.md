@@ -1,28 +1,27 @@
 # Genix
 
-gentoo, but one toml file and you can roll back.
+Gentoo with one configuration file, and a way to roll a change back.
 
-site: https://genixos.org/  
-repo: https://github.com/zubbledew6/genix
+Site: https://genixos.org/  
+Repo: https://github.com/zubbledew6/genix
 
 ```
 configuration.toml  →  genix-rebuild switch  →  generation N
 ```
 
-## what it is
+## What it is
 
-- live usb installer → gentoo stage3 + openrc on btrfs `@`
-- edit `/etc/genix/configuration.toml`, run `genix-rebuild switch`
-- generations: list / rollback / prune / delete
-- optional grub boot menu via btrfs `@genix-N` snapshots
-- wifi from the live stick gets copied over (iwd)
-- default is compile from source (`binary = false`). binhost if you want it fast
+- A live USB installer. It downloads a Gentoo stage3 and installs OpenRC on btrfs `@`. It does not copy the live system onto the disk.
+- After install, edit `/etc/genix/configuration.toml` and run `genix-rebuild switch`.
+- Generations can be listed, rolled back, pruned, and deleted.
+- With GRUB and btrfs, each generation can also be a boot-menu entry (`@genix-N`).
+- Wi-Fi profiles from the live USB are copied across (iwd).
 
-ships with **openrc**. `services.enable` also works on **systemd** and **sysv**. runit/dinit later maybe, no date.
+The release install is OpenRC. `genix-rebuild` can still enable services on systemd or sysv if those are already what the machine boots.
 
-## install from iso
+Saying no at the config-edit prompt installs this machine from Gentoo's binary packages. The saved config keeps `binary = false`, so later `genix-rebuild switch` builds from source. Saying yes means you edit the file and this install compiles.
 
-build on an arch/cachy box:
+## Install from the ISO
 
 ```bash
 git clone https://github.com/zubbledew6/genix.git
@@ -30,19 +29,23 @@ cd genix
 sudo ./iso/build.sh
 ```
 
-iso ends up in `iso/out/`. flash it, boot the **machine you want to wipe/install**, not your main pc.
+The image is `iso/out/genix-live.iso`. Flash it and boot the machine you intend to install, not the one you use every day.
 
 ```bash
 genix-install
 ```
 
-when it asks to edit config:
-- **no** → pulls binaries, faster
-- **yes** → you edit use flags / -j / packages, it compiles
+On the live USB, connect first if you are on Wi-Fi:
 
-more detail: [iso/README.md](iso/README.md)
+```bash
+iwctl station wlan0 connect "SSID"
+```
 
-## already have gentoo / lfs
+Build notes, including Artix: [iso/README.md](iso/README.md)
+
+## Already have Gentoo or LFS
+
+`install.sh` sets up Genix on a system that already has Portage. It does not repartition the disk. Moving an ext4 root to btrfs is a separate step: [docs/LAPTOP-BTRFS-MIGRATE.md](docs/LAPTOP-BTRFS-MIGRATE.md).
 
 ```bash
 scp -r genix user@host:/tmp/
@@ -51,17 +54,17 @@ su -
 cd /tmp/genix && ./install.sh
 ```
 
-## needs
+## Requirements
 
-- portage
-- gcc (`make` builds the c tools)
-- python 3.11+ only for `genix-install`
-- root for install/switch/rollback
-- btrfs + grub if you want boot generations
+- Portage
+- gcc (`make` builds the C tools)
+- Python 3.11+ for `genix-install` only
+- root for install, switch, and rollback
+- btrfs and GRUB if you want generations in the boot menu
 
-lfs bootstrap: `./bootstrap-portage.sh`
+LFS bootstrap: `./bootstrap-portage.sh`
 
-## config sketch
+## Configuration
 
 ```toml
 [system]
@@ -90,9 +93,9 @@ want = [
 enable = ["iwd", "dhcpcd", "sshd"]
 ```
 
-full example: `example/configuration.toml`
+Full example: `example/configuration.toml`
 
-## commands
+## Commands
 
 ```bash
 genix-rebuild switch
@@ -104,12 +107,10 @@ genix-rebuild boot sync
 genix-install
 ```
 
-## other notes
+## Notes
 
-- [daily driver](docs/DAILY-DRIVER.md)
-- [boot generations](docs/BOOT-GENERATIONS.md)
-- [pushing to github](docs/PUBLISHING.md)
-- [fastfetch](docs/FASTFETCH.md)
-- [roadmap](docs/ROADMAP.md)
+- [Daily driver](docs/DAILY-DRIVER.md)
+- [Boot generations](docs/BOOT-GENERATIONS.md)
+- [Fastfetch logo](docs/FASTFETCH.md)
 
-AGPLv3 — [LICENSE](LICENSE)
+GPLv3. See [LICENSE](LICENSE).

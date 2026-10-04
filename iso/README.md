@@ -3,7 +3,7 @@
 boot this on the laptop you want genix on. not your daily driver.
 
 github: https://github.com/zubbledew6/genix  
-site: https://genix.hoi-hoi33666.workers.dev/
+site: https://genixos.org/
 
 the stick is just a live env. install downloads a gentoo stage3 and builds from that — it does **not** copy the live root onto disk.
 
@@ -20,7 +20,7 @@ the stick is just a live env. install downloads a gentoo stage3 and builds from 
 needs archiso, gcc, make, net, root:
 
 ```bash
-cd ~/Projects/arch-hyprland/genix
+cd genix
 sudo ./iso/build.sh
 ```
 

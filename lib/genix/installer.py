@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# live ISO installer. writes a gentoo stage3, not a copy of the live root.
 
 import getpass
 import hashlib
@@ -20,8 +19,8 @@ DRAFT_CONFIG = Path("/tmp/genix-configuration.toml")
 
 STAGE3_BASE = "https://distfiles.gentoo.org/releases/amd64/autobuilds"
 STAGE3_POINTER = STAGE3_BASE + "/latest-stage3-amd64-openrc.txt"
-BINHOST = "https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64"
-GENTOO_PROFILE = "default/linux/amd64/23.0"
+BINHOST = "https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64/"
+SNAPSHOT = "https://distfiles.gentoo.org/snapshots/gentoo-latest.tar.xz"
 
 ESP_GUID = "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 ESP_SIZE_MIB = 512
@@ -35,7 +34,6 @@ KEYMAP_DEFAULT = "us"
 
 USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
 
-# also dumped into the first generation so switch doesn't unmerge them
 BASE_PACKAGES = [
     "app-admin/sudo",
     "app-editors/nano",
@@ -51,7 +49,6 @@ BASE_PACKAGES = [
 ]
 
 OPENRC_SERVICES = ["iwd", "dhcpcd", "sshd"]
-
 
 class InstallError(RuntimeError):
     pass
@@ -96,7 +93,6 @@ def parent_disk(part_name):
 
 
 def busy_disks():
-    # live usb + anything already mounted
     out = set()
     try:
         mounts = Path("/proc/mounts").read_text(encoding="utf-8").splitlines()
@@ -120,7 +116,7 @@ def list_disks():
     busy = busy_disks()
     for p in sorted(block.iterdir()):
         name = p.name
-        if not (name.startswith("sd") or name.startswith("nvme") or name.startswith("vd") or name.startswith("mmcblk")):
+        if not (name.startswith("sd") or name.startswith("nvme") or name.startswith("vd")):
             continue
         if name.endswith(("boot", "rpmb")):
             continue
@@ -152,7 +148,6 @@ def list_partitions(disk):
     out = []
 
     def add(node):
-        # lsblk -J puts partitions next to the disk, not under children. annoying.
         path = node.get("path") or ""
         if not path or path == disk:
             return
@@ -221,7 +216,6 @@ def part_name(disk, index):
 
 
 def wait_for_dev(path, dry_run, timeout=20):
-    # parted returns before the node shows up
     if dry_run:
         return
     subprocess.run(["udevadm", "settle"], check=False)
@@ -230,7 +224,7 @@ def wait_for_dev(path, dry_run, timeout=20):
         if Path(path).exists():
             return
         time.sleep(0.3)
-        raise InstallError("partition %s never showed up (disk busy?)" % path)
+    raise InstallError("partition %s never showed up (disk busy?)" % path)
 
 
 def release_disk(disk, dry_run):
@@ -320,7 +314,6 @@ def apply_partitioning(plan, dry_run):
         return partition_wipe(plan["disk"], dry_run)
     if plan["mode"] == "alongside":
         return partition_alongside(plan, dry_run)
-    # manual: partitions already chosen by the user
     efi = plan["efi_part"]
     root = plan["root_part"]
     release_disk(plan["disk"], dry_run)
@@ -330,7 +323,9 @@ def apply_partitioning(plan, dry_run):
 
 
 def setup_btrfs(root_part, dry_run):
-    sh(["mkfs.btrfs", "-f", "-L", "genix-root", root_part], dry_run)
+    sh(["umount", str(MNT)], dry_run, check=False)
+    sh(["mkfs.btrfs", "-f", "-K", "-L", "genix-root", root_part], dry_run)
+    sh(["udevadm", "settle"], dry_run, check=False)
     if not dry_run:
         MNT.mkdir(parents=True, exist_ok=True)
     sh(["mount", root_part, str(MNT)], dry_run)
@@ -344,9 +339,6 @@ def mount_efi(efi_part, dry_run):
     if not dry_run:
         efi_mnt.mkdir(parents=True, exist_ok=True)
     sh(["mount", efi_part, str(efi_mnt)], dry_run)
-
-
-# stage3
 
 
 def stage3_url(dry_run):
@@ -409,9 +401,6 @@ def extract_stage3(tarball, dry_run):
     )
 
 
-# chroot
-
-
 def prepare_chroot(dry_run):
     for d in ("dev", "proc", "sys", "run"):
         dst = MNT / d
@@ -420,9 +409,15 @@ def prepare_chroot(dry_run):
         sh(["mount", "--rbind", str(Path("/") / d), str(dst)], dry_run)
         sh(["mount", "--make-rslave", str(dst)], dry_run, check=False)
     if dry_run:
-        print("copy /etc/resolv.conf into target")
+        print("copy resolv.conf into target")
     else:
-        shutil.copy2("/etc/resolv.conf", MNT / "etc" / "resolv.conf")
+        src = Path("/run/systemd/resolve/resolv.conf")
+        if not src.is_file():
+            src = Path("/etc/resolv.conf")
+        dst = MNT / "etc" / "resolv.conf"
+        if dst.is_symlink() or dst.exists():
+            dst.unlink()
+        shutil.copyfile(src, dst)
 
 
 def cleanup_chroot(dry_run):
@@ -447,11 +442,18 @@ def write_file(path, text, dry_run, mode=None):
         path.chmod(mode)
 
 
-# portage
+def write_portage(path, text, dry_run):
+    parent = path.parent
+    if not dry_run and parent.is_file():
+        old = parent.read_text(encoding="utf-8")
+        if old and not old.endswith("\n"):
+            old += "\n"
+        parent.write_text(old + text, encoding="utf-8")
+        return
+    write_file(path, text, dry_run)
 
 
 def stage3_make_conf_vars():
-    # keep whatever the stage3 already set
     values = {"COMMON_FLAGS": "-O2 -pipe", "CHOST": "x86_64-pc-linux-gnu"}
     make_conf = MNT / "etc" / "portage" / "make.conf"
     if not make_conf.is_file():
@@ -468,7 +470,6 @@ def portage_settings(dry_run):
     jobs = os.cpu_count() or 4
     return {
         "makeopts": "-j%d" % jobs,
-        # both platforms so the official binhost grub matches
         "grub_platforms": "efi-64 pc",
         "vars": {"COMMON_FLAGS": "-O2 -pipe", "CHOST": "x86_64-pc-linux-gnu"}
         if dry_run
@@ -507,14 +508,17 @@ def want_atoms(data):
     return out
 
 
+def use_flags(data):
+    use = (data.get("system") or {}).get("use") or []
+    if isinstance(use, str):
+        return use
+    return " ".join(str(x) for x in use)
+
+
 def portage_from_toml(data, settings, install_binary=None):
     system = data.get("system") or {}
     portage = system.get("portage") or {}
-    use = system.get("use") or ["-systemd", "elogind"]
-    if isinstance(use, list):
-        use_s = " ".join(str(x) for x in use)
-    else:
-        use_s = str(use)
+    use_s = use_flags(data)
     features = portage.get("features") or "parallel-fetch"
     if install_binary is not None:
         binary = bool(install_binary)
@@ -533,50 +537,30 @@ def portage_from_toml(data, settings, install_binary=None):
         "grub_platforms": vars_.get("GRUB_PLATFORMS") or settings["grub_platforms"],
         "pkg_use": (data.get("packages") or {}).get("use") or {},
         "want": want_atoms(data),
+        "profile": "default/linux/amd64/23.0",
     }
 
 
 def configure_portage(portage, dry_run):
-    features = portage["features"]
-    feat_bits = [f for f in features.split() if f]
-    emerge_opts = ""
-    if portage["binary"]:
-        if "getbinpkg" not in feat_bits:
-            feat_bits.append("getbinpkg")
-        emerge_opts = 'EMERGE_DEFAULT_OPTS="--getbinpkg"\n'
-    else:
-        feat_bits = [f for f in feat_bits if f != "getbinpkg"]
-    features = " ".join(feat_bits) or "parallel-fetch"
-
-    text = (
-        'COMMON_FLAGS="%s"\n'
-        'CFLAGS="${COMMON_FLAGS}"\n'
-        'CXXFLAGS="${COMMON_FLAGS}"\n'
-        'FCFLAGS="${COMMON_FLAGS}"\n'
-        'FFLAGS="${COMMON_FLAGS}"\n'
-        'CHOST="%s"\n'
-        'MAKEOPTS="%s"\n'
+    extra = (
         'USE="%s"\n'
-        'ACCEPT_KEYWORDS="amd64"\n'
-        # "*/*" is wrong here, firmware stays masked
-        'ACCEPT_LICENSE="* -@EULA"\n'
+        'MAKEOPTS="%s"\n'
         'GRUB_PLATFORMS="%s"\n'
-        'FEATURES="%s"\n'
-        'PORTAGE_BINHOST="%s"\n'
-        "%s"
-        "LC_MESSAGES=C.utf8\n"
-        % (
-            portage["vars"].get("COMMON_FLAGS", "-O2 -pipe"),
-            portage["vars"].get("CHOST", "x86_64-pc-linux-gnu"),
-            portage["makeopts"],
-            portage["use"],
-            portage["grub_platforms"],
-            features,
-            portage["binhost"],
-            emerge_opts,
-        )
+        'ACCEPT_LICENSE="* -@EULA"\n'
+        % (portage["use"], portage["makeopts"], portage["grub_platforms"])
     )
-    write_file(MNT / "etc" / "portage" / "make.conf", text, dry_run)
+    if portage["binary"]:
+        extra += 'FEATURES="${FEATURES} getbinpkg"\n'
+        extra += 'EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --getbinpkg"\n'
+    make_conf = MNT / "etc" / "portage" / "make.conf"
+    if dry_run:
+        print("append", make_conf)
+    else:
+        old = make_conf.read_text(encoding="utf-8") if make_conf.is_file() else ""
+        if old and not old.endswith("\n"):
+            old += "\n"
+        make_conf.parent.mkdir(parents=True, exist_ok=True)
+        make_conf.write_text(old + extra, encoding="utf-8")
 
     use_lines = ["sys-kernel/installkernel dracut\n"]
     for atom, flags in portage["pkg_use"].items():
@@ -587,12 +571,12 @@ def configure_portage(portage, dry_run):
         else:
             flag_s = str(flags)
         use_lines.append("%s %s\n" % (atom, flag_s))
-    write_file(
+    write_portage(
         MNT / "etc" / "portage" / "package.use" / "genix-base",
         "".join(use_lines),
         dry_run,
     )
-    write_file(
+    write_portage(
         MNT / "etc" / "portage" / "package.license" / "genix-base",
         "sys-kernel/linux-firmware linux-fw-redistributable no-source-code\n"
         "sys-firmware/* linux-fw-redistributable no-source-code\n",
@@ -606,7 +590,19 @@ def configure_portage(portage, dry_run):
         "auto-sync = yes\n",
         dry_run,
     )
-    # hostonly would bake the live usb's hardware into the initramfs
+    if portage["binary"]:
+        write_file(
+            MNT / "etc" / "portage" / "binrepos.conf" / "genix.conf",
+            "[gentoo]\npriority = 9999\n"
+            "sync-uri = %s\n"
+            "verify-signature = true\n" % portage["binhost"],
+            dry_run,
+        )
+    repo = MNT / "var" / "db" / "repos" / "gentoo"
+    if dry_run:
+        print("mkdir", repo)
+    else:
+        repo.mkdir(parents=True, exist_ok=True)
     write_file(
         MNT / "etc" / "dracut.conf.d" / "genix.conf",
         'hostonly="no"\ncompress="zstd"\nadd_dracutmodules+=" btrfs "\n',
@@ -614,13 +610,34 @@ def configure_portage(portage, dry_run):
     )
 
 
+def sync_gentoo_tree(dry_run):
+    repo = MNT / "var" / "db" / "repos" / "gentoo"
+    if dry_run:
+        print("fetch", SNAPSHOT)
+        return
+    repo.parent.mkdir(parents=True, exist_ok=True)
+    snap = Path("/tmp/gentoo-latest.tar.xz")
+    sh(["curl", "-fL", "--retry", "3", "--progress-bar", "-o", str(snap), SNAPSHOT])
+    if repo.is_symlink():
+        repo.unlink()
+    elif repo.exists():
+        shutil.rmtree(repo)
+    repo.mkdir()
+    sh(["tar", "--strip-components=1", "-xJf", str(snap), "-C", str(repo)])
+    if not (repo / "metadata").is_dir():
+        raise InstallError("gentoo snapshot did not unpack")
+
+
 def emerge_base(plan, portage, dry_run):
-    chroot_cmd(["emerge-webrsync"], dry_run)
-    chroot_cmd(["eselect", "profile", "set", GENTOO_PROFILE], dry_run, check=False)
+    sync_gentoo_tree(dry_run)
+    profile = portage["profile"]
+    profile_dir = MNT / "var" / "db" / "repos" / "gentoo" / "profiles" / profile
+    if not dry_run and not profile_dir.is_dir():
+        raise InstallError("no such profile: %s" % profile)
+    chroot_cmd(["eselect", "profile", "set", profile], dry_run)
     chroot_cmd(["eselect", "profile", "show"], dry_run, check=False)
 
-    # os-prober wants grub[mount]. binhost grub doesn't have it. mask first.
-    write_file(
+    write_portage(
         MNT / "etc" / "portage" / "package.mask" / "genix-os-prober",
         "sys-boot/os-prober\n",
         dry_run,
@@ -636,7 +653,7 @@ def emerge_base(plan, portage, dry_run):
     chroot_cmd(cmd + pkgs, dry_run)
 
     if plan.get("dual_boot"):
-        write_file(
+        write_portage(
             MNT / "etc" / "portage" / "package.use" / "genix-grub",
             "sys-boot/grub mount\n",
             dry_run,
@@ -666,9 +683,6 @@ def emerge_base(plan, portage, dry_run):
         raise InstallError("no initramfs in /boot, dracut didn't run")
 
 
-# users / fstab / etc
-
-
 def write_fstab(root_part, efi_part, dry_run):
     uuid_root = "ROOT_UUID"
     uuid_efi = "EFI_UUID"
@@ -681,8 +695,7 @@ def write_fstab(root_part, efi_part, dry_run):
                 ["blkid", "-s", "UUID", "-o", "value", efi_part], text=True
             ).strip()
     lines = [
-        "# root subvol comes from GRUB rootflags= (not fstab)",
-        "UUID=%s  /  btrfs  compress=zstd  0 0" % uuid_root,
+        "UUID=%s  /  btrfs  compress=zstd,subvol=@  0 0" % uuid_root,
     ]
     if efi_part:
         lines.append("UUID=%s  /boot/efi  vfat  defaults  0 2" % uuid_efi)
@@ -733,35 +746,34 @@ def configure_system(cfg, dry_run):
             raise InstallError("failed to set password for %s" % account)
 
 
-def enable_services(dry_run):
-    for svc in OPENRC_SERVICES:
+def enable_services(services, dry_run):
+    for svc in services:
         chroot_cmd(["rc-update", "add", svc, "default"], dry_run, check=False)
 
 
-def install_bootloader(plan, dry_run):
+def install_bootloader(plan, cfg, dry_run):
     dual = plan["dual_boot"]
+    cmdline = "rootflags=subvol=@"
     grub_default = (
         'GRUB_DISTRIBUTOR="Genix"\n'
         "GRUB_TIMEOUT=5\n"
         "GRUB_TIMEOUT_STYLE=menu\n"
-        'GRUB_CMDLINE_LINUX="rootflags=subvol=@"\n'
+        'GRUB_CMDLINE_LINUX="%s"\n'
         'GRUB_CMDLINE_LINUX_DEFAULT="loglevel=3"\n'
         'GRUB_PRELOAD_MODULES="part_gpt part_msdos btrfs"\n'
-        "GRUB_DISABLE_OS_PROBER=%s\n" % ("false" if dual else "true")
-    )
+        "GRUB_DISABLE_OS_PROBER=%s\n"
+    ) % (cmdline, "false" if dual else "true")
     write_file(MNT / "etc" / "default" / "grub", grub_default, dry_run)
 
     if uefi_mode():
-        chroot_cmd(
-            ["grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi", "--bootloader-id=Genix"],
-            dry_run,
-        )
-        # don't overwrite EFI/BOOT/BOOTX64.EFI if windows is on this disk
-        if not dual:
+        named = ["grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi", "--bootloader-id=Genix"]
+        if dual:
+            chroot_cmd(named, dry_run)
+        else:
+            chroot_cmd(named, dry_run, check=False)
             chroot_cmd(
                 ["grub-install", "--target=x86_64-efi", "--efi-directory=/boot/efi", "--removable"],
                 dry_run,
-                check=False,
             )
     else:
         chroot_cmd(["grub-install", "--target=i386-pc", plan["disk"]], dry_run)
@@ -780,9 +792,6 @@ def install_bootloader(plan, dry_run):
         print("grub: %d other os entries" % max(0, others))
 
 
-# seed /etc/genix
-
-
 def genix_config(cfg, settings):
     want = "\n".join('  "%s",' % p for p in BASE_PACKAGES)
     services = ", ".join('"%s"' % s for s in OPENRC_SERVICES)
@@ -790,8 +799,6 @@ def genix_config(cfg, settings):
     if cfg.get("dual_boot"):
         pkg_use += '"sys-boot/grub" = ["mount"]\n'
     return (
-        "# binary=false = compile. makeopts = -j. use = global USE.\n"
-        "# packages.use = per package. add stuff under packages.want.\n\n"
         "[system]\n"
         'hostname = "%s"\n'
         'use = ["-systemd", "elogind"]\n\n'
@@ -802,7 +809,7 @@ def genix_config(cfg, settings):
         'id_like = "gentoo"\n'
         'version = "0.1"\n'
         'version_id = "0.1"\n'
-        'home_url = "https://genix.hoi-hoi33666.workers.dev/"\n'
+        'home_url = "https://genixos.org/"\n'
         'logo = "genix"\n'
         'ansi_color = "38;2;192;132;184"\n'
         'bug_report_url = "https://github.com/zubbledew6/genix/issues"\n'
@@ -863,7 +870,6 @@ def seed_genix(cfg, settings, dry_run):
         if not GENIX_SRC.is_dir():
             raise InstallError("GENIX_SRC missing: %s" % GENIX_SRC)
         shutil.copytree(GENIX_SRC, dst, dirs_exist_ok=True)
-        # squashfs often strips +x
         for script in [dst / "install.sh"] + sorted((dst / "bin").glob("*")):
             if script.is_file():
                 script.chmod(0o755)
@@ -907,12 +913,13 @@ def copy_wifi(dry_run):
         shutil.copy2(live_conf, conf_dir / "main.conf")
 
 
-def maybe_edit_config(path):
+def maybe_edit_config(cfg, settings):
     print()
-    print("wrote %s" % path)
     print("yes: edit USE, -j, packages — install compiles from source")
     print("no:  skip edit — fast install from binary packages")
     print("     (after reboot, genix-rebuild still compiles from source)")
+    DRAFT_CONFIG.write_text(genix_config(cfg, settings), encoding="utf-8")
+    print("wrote %s" % DRAFT_CONFIG)
     if not ask_yesno("Edit configuration.toml before installing?", default=False):
         print("using binary packages for this install")
         return False
@@ -925,9 +932,9 @@ def maybe_edit_config(path):
     if not editor:
         print("no editor found — falling back to binary install")
         return False
-    subprocess.run([editor, str(path)])
+    subprocess.run([editor, str(DRAFT_CONFIG)])
     try:
-        load_toml(path)
+        load_toml(DRAFT_CONFIG)
     except Exception as exc:
         raise InstallError("configuration.toml is invalid: %s" % exc)
     print("compiling from source with your configuration")
@@ -969,11 +976,16 @@ def run_install(plan, cfg, dry_run):
         copy_wifi(dry_run)
         step("users / locale")
         configure_system(cfg, dry_run)
-        enable_services(dry_run)
+        raw_services = (data.get("services") or {}).get("enable")
+        if isinstance(raw_services, list):
+            services = [str(s) for s in raw_services]
+        else:
+            services = list(OPENRC_SERVICES)
+        enable_services(services, dry_run)
         step("genix")
         seed_genix(cfg, settings, dry_run)
         step("grub")
-        install_bootloader(plan, dry_run)
+        install_bootloader(plan, cfg, dry_run)
         chroot_cmd(["genix-rebuild", "switch", "--no-emerge"], dry_run, check=False)
     finally:
         cleanup_chroot(dry_run)
@@ -1375,8 +1387,8 @@ def main():
             return 1
         cfg = ask_settings(dry_run)
         cfg["dual_boot"] = bool(plan.get("dual_boot"))
-        DRAFT_CONFIG.write_text(genix_config(cfg, portage_settings(True)), encoding="utf-8")
-        edited = maybe_edit_config(DRAFT_CONFIG)
+        settings = portage_settings(True)
+        edited = maybe_edit_config(cfg, settings)
         cfg["install_binary"] = not edited
         data = load_toml(DRAFT_CONFIG)
         host = ((data.get("system") or {}).get("hostname") or "").strip()
