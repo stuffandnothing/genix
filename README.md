@@ -88,10 +88,28 @@ want = [
   "app-editors/vim",
   { name = "www-client/firefox", binary = true },
 ]
+mask = ["net-misc/networkmanager"]
+
+[packages.use]
+"sys-kernel/installkernel" = ["dracut"]
+
+[packages.accept_keywords]
+"www-client/firefox-bin" = "~amd64"
+
+[packages.license]
+"www-client/google-chrome" = "google-chrome"
+
+[packages.env]
+"www-client/firefox" = "ccache.conf"
+
+[system.portage.env_files]
+"ccache.conf" = { CCACHE_DIR = "/var/cache/ccache" }
 
 [services]
 enable = ["iwd", "dhcpcd", "sshd"]
 ```
+
+`packages.use`, `packages.accept_keywords`, `packages.license`, and `packages.env` each render straight to the matching `/etc/portage/package.*` dropin (one atom per key; a string or array of flags as the value). `system.portage.env_files` renders each table entry to `/etc/portage/env/<name>`. If the dropin directory already has hand-written files in it, genix only owns one file named `genix` inside it and leaves the rest alone.
 
 Full example: `example/configuration.toml`
 

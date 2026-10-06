@@ -124,6 +124,50 @@ sync_one(int dry, const char *src, const char *dst)
 }
 
 static void
+sync_dropin(int dry, const char *src, const char *dstdir)
+{
+	char *dst = is_dir(dstdir) ? strf("%s/genix", dstdir) : xstrdup(dstdir);
+
+	if (exists(src))
+		sync_one(dry, src, dst);
+	else if (!dry && exists(dst) && !is_dir(dst))
+		unlink(dst);
+	free(dst);
+}
+
+static void
+sync_env_dir(int dry, const char *rendered)
+{
+	char *srcdir = strf("%s/portage/env", rendered);
+	DIR *d;
+	struct dirent *e;
+
+	if (!is_dir(srcdir)) {
+		free(srcdir);
+		return;
+	}
+	if (!dry)
+		mkdir_p(GENIX_PORTAGE "/env");
+	d = opendir(srcdir);
+	if (!d) {
+		free(srcdir);
+		return;
+	}
+	while ((e = readdir(d))) {
+		char *src, *dst;
+		if (e->d_name[0] == '.')
+			continue;
+		src = strf("%s/%s", srcdir, e->d_name);
+		dst = strf("%s/env/%s", GENIX_PORTAGE, e->d_name);
+		sync_one(dry, src, dst);
+		free(src);
+		free(dst);
+	}
+	closedir(d);
+	free(srcdir);
+}
+
+static void
 sync_portage(int dry, const char *rendered)
 {
 	char *srcbase = strf("%s/portage", rendered);
@@ -146,16 +190,26 @@ sync_portage(int dry, const char *rendered)
 	free(dst);
 
 	src = strf("%s/package.use", srcbase);
-	if (is_dir(GENIX_PORTAGE "/package.use"))
-		dst = strf("%s/package.use/genix", GENIX_PORTAGE);
-	else
-		dst = strf("%s/package.use", GENIX_PORTAGE);
-	if (exists(src))
-		sync_one(dry, src, dst);
-	else if (!dry && exists(dst) && !is_dir(dst))
-		unlink(dst);
+	sync_dropin(dry, src, GENIX_PORTAGE "/package.use");
 	free(src);
-	free(dst);
+
+	src = strf("%s/package.accept_keywords", srcbase);
+	sync_dropin(dry, src, GENIX_PORTAGE "/package.accept_keywords");
+	free(src);
+
+	src = strf("%s/package.mask", srcbase);
+	sync_dropin(dry, src, GENIX_PORTAGE "/package.mask");
+	free(src);
+
+	src = strf("%s/package.license", srcbase);
+	sync_dropin(dry, src, GENIX_PORTAGE "/package.license");
+	free(src);
+
+	src = strf("%s/package.env", srcbase);
+	sync_dropin(dry, src, GENIX_PORTAGE "/package.env");
+	free(src);
+
+	sync_env_dir(dry, rendered);
 
 	src = strf("%s/package.provided", srcbase);
 	if (!dry)

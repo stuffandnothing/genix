@@ -347,95 +347,96 @@ parse_doc(const char *src, char **err)
 			break;
 		c = peek(&p);
 		if (c == '[') {
-			char *inside, **parts;
-			int nparts, i, arr = 0;
+			char **parts;
+			int nparts = 0, cap = 4, i, arr = 0;
 
 			p.p++;
 			if (eat(&p, '['))
 				arr = 1;
-			inside = parse_key(&p);
-			if (!inside)
+			parts = xmalloc(sizeof(char *) * cap);
+			parts[nparts] = parse_key(&p);
+			if (!parts[nparts]) {
+				free(parts);
 				goto fail;
-			/* [a.b.c] — keep eating .key until the ] */
-			{
-				char *acc = xstrdup(inside);
-				free(inside);
-				while (eat(&p, '.')) {
-					char *more = parse_key(&p);
-					char *join;
-					if (!more)
-						break;
-					join = strf("%s.%s", acc, more);
-					free(acc);
-					free(more);
-					acc = join;
+			}
+			nparts++;
+			while (eat(&p, '.')) {
+				char *more = parse_key(&p);
+				if (!more)
+					break;
+				if (nparts >= cap) {
+					cap *= 2;
+					parts = xrealloc(parts, sizeof(char *) * cap);
 				}
-				inside = acc;
+				parts[nparts++] = more;
 			}
 			if (arr) {
 				if (!eat(&p, ']') || !eat(&p, ']')) {
 					seterr(&p, "bad [[table]]");
-					free(inside);
+					for (i = 0; i < nparts; i++)
+						free(parts[i]);
+					free(parts);
 					goto fail;
 				}
 			} else if (!eat(&p, ']')) {
 				seterr(&p, "bad [table]");
-				free(inside);
-				goto fail;
-			}
-			if (!split_dotted(inside, &parts, &nparts)) {
-				free(inside);
+				for (i = 0; i < nparts; i++)
+					free(parts[i]);
+				free(parts);
 				goto fail;
 			}
 			cur = root;
 			for (i = 0; i < nparts; i++)
 				cur = table_ensure(cur, parts[i], TOML_TABLE);
+			for (i = 0; i < nparts; i++)
+				free(parts[i]);
 			free(parts);
-			free(inside);
 			continue;
 		}
 
 		{
-			char *k, *acc, **parts;
-			int nparts, i;
+			char **parts;
+			int nparts = 0, cap = 4, i;
 			Toml *v, *parent;
 
-			k = parse_key(&p);
-			if (!k)
+			parts = xmalloc(sizeof(char *) * cap);
+			parts[nparts] = parse_key(&p);
+			if (!parts[nparts]) {
+				free(parts);
 				goto fail;
-			acc = xstrdup(k);
-			free(k);
+			}
+			nparts++;
 			while (eat(&p, '.')) {
 				char *more = parse_key(&p);
-				char *join;
 				if (!more)
 					break;
-				join = strf("%s.%s", acc, more);
-				free(acc);
-				free(more);
-				acc = join;
+				if (nparts >= cap) {
+					cap *= 2;
+					parts = xrealloc(parts, sizeof(char *) * cap);
+				}
+				parts[nparts++] = more;
 			}
 			if (!eat(&p, '=')) {
 				seterr(&p, "expected =");
-				free(acc);
+				for (i = 0; i < nparts; i++)
+					free(parts[i]);
+				free(parts);
 				goto fail;
 			}
 			v = parse_value(&p);
 			if (!v) {
-				free(acc);
-				goto fail;
-			}
-			if (!split_dotted(acc, &parts, &nparts)) {
-				toml_free(v);
-				free(acc);
+				for (i = 0; i < nparts; i++)
+					free(parts[i]);
+				free(parts);
 				goto fail;
 			}
 			parent = cur;
 			for (i = 0; i < nparts - 1; i++)
 				parent = table_ensure(parent, parts[i], TOML_TABLE);
 			table_set(parent, parts[nparts - 1], v);
+			for (i = 0; i < nparts; i++)
+				free(parts[i]);
 			free(parts);
-			free(acc);
 		}
 	}
 

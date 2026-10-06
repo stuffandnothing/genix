@@ -279,6 +279,107 @@ append_line(char **buf, size_t *n, size_t *cap, const char *line)
 	(*buf)[*n] = 0;
 }
 
+static void
+write_atom_table(const Toml *table, const char *path)
+{
+	if (table && table->type == TOML_TABLE && table->n) {
+		char *body = xstrdup("");
+		size_t bn = 0, bcap = 0;
+		int *idx = xmalloc(sizeof(int) * table->n);
+		int i, j;
+
+		for (i = 0; i < table->n; i++)
+			idx[i] = i;
+		for (i = 0; i < table->n; i++)
+			for (j = i + 1; j < table->n; j++)
+				if (strcmp(table->keys[idx[j]], table->keys[idx[i]]) < 0) {
+					int tmp = idx[i];
+					idx[i] = idx[j];
+					idx[j] = tmp;
+				}
+		for (i = 0; i < table->n; i++) {
+			Toml *v = table->vals[idx[i]];
+			char *line;
+			if (v->type == TOML_ARRAY) {
+				char *joined = join_use(v);
+				line = joined[0] ? strf("%s %s", table->keys[idx[i]], joined)
+						  : strf("%s", table->keys[idx[i]]);
+				free(joined);
+			} else if (v->type == TOML_STR && v->str[0])
+				line = strf("%s %s", table->keys[idx[i]], v->str);
+			else
+				line = strf("%s", table->keys[idx[i]]);
+			append_line(&body, &bn, &bcap, line);
+			free(line);
+		}
+		write_file(path, body, 0644, 0);
+		free(body);
+		free(idx);
+	} else if (exists(path)) {
+		unlink(path);
+	}
+}
+
+static void
+write_atom_list(const Toml *list, const char *path)
+{
+	if (list && list->type == TOML_ARRAY && list->n) {
+		char *body = xstrdup("");
+		size_t bn = 0, bcap = 0;
+		int i;
+
+		for (i = 0; i < list->n; i++)
+			if (list->vals[i]->type == TOML_STR)
+				append_line(&body, &bn, &bcap, list->vals[i]->str);
+		write_file(path, body, 0644, 0);
+		free(body);
+	} else if (exists(path)) {
+		unlink(path);
+	}
+}
+
+static void
+write_env_files(const Toml *table, const char *envdir)
+{
+	int i;
+
+	if (!table || table->type != TOML_TABLE || !table->n)
+		return;
+	mkdir_p(envdir);
+	for (i = 0; i < table->n; i++) {
+		Toml *vars = table->vals[i];
+		char *mc = NULL, *f;
+		size_t n = 0, cap = 0;
+		int j;
+
+		if (vars->type != TOML_TABLE)
+			continue;
+		for (j = 0; j < vars->n; j++) {
+			const char *key = vars->keys[j];
+			Toml *v = vars->vals[j];
+			char *line;
+			if (!key[0] || !(isalpha((unsigned char)key[0]) || key[0] == '_'))
+				die("invalid env var name: %s", key);
+			if (v->type == TOML_STR)
+				line = strf("%s=\"%s\"", key, v->str);
+			else if (v->type == TOML_ARRAY) {
+				char *joined = join_use(v);
+				line = strf("%s=\"%s\"", key, joined);
+				free(joined);
+			} else if (v->type == TOML_BOOL)
+				line = strf("%s=\"%s\"", key, v->boolean ? "true" : "false");
+			else
+				line = strf("%s=\"%ld\"", key, v->num);
+			append_line(&mc, &n, &cap, line);
+			free(line);
+		}
+		f = strf("%s/%s", envdir, table->keys[i]);
+		write_file(f, mc ? mc : "", 0644, 0);
+		free(f);
+		free(mc);
+	}
+}
+
 int
 render_config(const char *config_path, const char *output_dir, Manifest *out)
 {
@@ -404,44 +505,33 @@ render_config(const char *config_path, const char *output_dir, Manifest *out)
 	overrides = toml_get(cfg, "packages.use");
 	{
 		char *f = strf("%s/package.use", path);
-		if (overrides && overrides->type == TOML_TABLE && overrides->n) {
-			char *body = xstrdup("");
-			size_t bn = 0, bcap = 0;
-			/* sort atoms so diffs aren't noisy */
-			int *idx = xmalloc(sizeof(int) * overrides->n);
-			for (i = 0; i < overrides->n; i++)
-				idx[i] = i;
-			for (i = 0; i < overrides->n; i++) {
-				int j;
-				for (j = i + 1; j < overrides->n; j++) {
-					if (strcmp(overrides->keys[idx[j]], overrides->keys[idx[i]]) < 0) {
-						int tmp = idx[i];
-						idx[i] = idx[j];
-						idx[j] = tmp;
-					}
-				}
-			}
-			for (i = 0; i < overrides->n; i++) {
-				Toml *flags = overrides->vals[idx[i]];
-				char *line;
-				if (flags->type == TOML_ARRAY) {
-					char *joined = join_use(flags);
-					line = strf("%s %s", overrides->keys[idx[i]], joined);
-					free(joined);
-				} else if (flags->type == TOML_STR)
-					line = strf("%s %s", overrides->keys[idx[i]], flags->str);
-				else
-					line = strf("%s", overrides->keys[idx[i]]);
-				append_line(&body, &bn, &bcap, line);
-				free(line);
-			}
-			write_file(f, body, 0644, 0);
-			free(body);
-			free(idx);
-		} else if (exists(f)) {
-			unlink(f);
-		}
+		write_atom_table(overrides, f);
 		free(f);
+	}
+	{
+		char *f = strf("%s/package.accept_keywords", path);
+		write_atom_table(toml_get(cfg, "packages.accept_keywords"), f);
+		free(f);
+	}
+	{
+		char *f = strf("%s/package.license", path);
+		write_atom_table(toml_get(cfg, "packages.license"), f);
+		free(f);
+	}
+	{
+		char *f = strf("%s/package.env", path);
+		write_atom_table(toml_get(cfg, "packages.env"), f);
+		free(f);
+	}
+	{
+		char *f = strf("%s/package.mask", path);
+		write_atom_list(toml_get(cfg, "packages.mask"), f);
+		free(f);
+	}
+	{
+		char *envdir = strf("%s/env", path);
+		write_env_files(toml_get(cfg, "system.portage.env_files"), envdir);
+		free(envdir);
 	}
 
 	{
